@@ -10,57 +10,48 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <vector>
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+
+#include <iostream>
+#include <string>
+
+using namespace cv;
+using namespace std;
+
 #define DEBUG 0
-__global__ void denoise(int *r, int *g, int *b, int width, int numElements) {
+
+__global__ void denoise(char *r, char*g, char*b, int width, int numElements) {
 	int tid = blockDim.x * blockIdx.x + threadIdx.x;
-	if (tid % width == 0) {
-		if (tid == 0) { // top left corner
-			r[tid] = (r[tid] + r[tid + 1] + r[tid + width]) / 3;
-		} else if (tid == (numElements - width)) { // bottom left corner
-			r[tid] = (r[tid] + r[tid - width] + r[tid + 1]) / 3;
-		} else { // middle left edge
-			r[tid] = (r[tid] + r[tid - width] + r[tid + width] + r[tid + 1])
-					/ 4;
+//	int column = tid % width;
+	int column = tid - ((tid / width) * width); // should be a mod operator
+	int row = tid / width;
+//	int row = blockDim.x * blockIdx.x + threadIdx.x;
+//	int column = blockDim.x * blockIdx.x + threadIdx.y;
+	int height = numElements / width;
+	int sumR = 0, countR = 0, sumG = 0, countG = 0, sumB = 0, countB = 0;
+	for (int i = row - 1; i <= row + 1; i++) {
+		for (int j = column - 1; j <= column + 1; j++) {
+
+			if (i > 0 && i < height && j > 0 && j < width) {
+				sumR += r[i * width + j];
+				countR++;
+				sumG += g[i * width + j];
+				countG++;
+				sumB += b[i * width + j];
+				countB++;
+			}
 		}
-	} else if (tid < width) {
-		if (tid == (width - 1)) { //top right corner
-			r[tid] = (r[tid] + r[tid - 1] + r[tid + width]) / 3;
-		} else { // middle first row
-			r[tid] = (r[tid] + r[tid + 1] + r[tid - 1] + r[tid + width]) / 4;
-		}
-	} else if (tid % width == (width - 1)) {
-		if (tid == numElements - 1) { //bottom right corner
-			r[tid] = (r[tid] + r[tid - 1] + r[tid - width]) / 3;
-		} else { //middle right edge
-			r[tid] = (r[tid] + r[tid - width] + r[tid + width] + r[tid - 1])
-					/ 4;
-		}
-	} else if (tid > numElements - width) { //bottom middle
-		r[tid] = (r[tid] + r[tid - width] + r[tid + 1] + r[tid - 1]) / 4;
-	} else { // middle of the matrix
-		r[tid] = ((r[tid] + r[tid - width] + r[tid + width] + r[tid - 1]
-				+ r[tid + 1]) / 5);
 	}
+	r[row * width + column] = (sumR / countR);
+	g[row * width + column] = (sumG / countG);
+	b[row * width + column] = (sumB / countB);
 
 }
 
-__global__ void naiveDenoise(int *r, int *g, int *b, int width,
-		int numElements) {
-	int tid = blockDim.x * blockIdx.x + threadIdx.x;
-
-	// naive no denoise done or edges or corners
-	if (tid % width == 0 || tid % width == (width - 1) || tid < width
-			|| tid > numElements - width) {
-	} else {
-		r[tid] = ((r[tid] + r[tid - width] + r[tid + width] + r[tid - 1]
-				+ r[tid + 1]) / 5);
-		g[tid] = ((g[tid] + g[tid - width] + g[tid + width] + g[tid - 1]
-				+ g[tid + 1]) / 5);
-		b[tid] = ((b[tid] + b[tid - width] + b[tid + width] + b[tid - 1]
-				+ b[tid + 1]) / 5);
-	}
-}
-void printMatrix(int numElements, int width, int* matrix) {
+void printMatrix(int numElements, int width, char* matrix) {
 
 	for (int i = 0; i < numElements; ++i) {
 		if (i % width == 0 && i != 0) {
@@ -71,35 +62,44 @@ void printMatrix(int numElements, int width, int* matrix) {
 }
 
 int main(void) {
-	int width = 2048;
-	int numElements = width * width;
+
 	time_t t;
-
 	srand((unsigned) time(&t));
+	String imageName("../src/noisy-man.png");
+	Mat3b image = imread(imageName, IMREAD_COLOR);
 
-	// Allocate host memory
-	int *h_r = (int *) malloc(numElements * sizeof(int));
-	int *h_g = (int *) malloc(numElements * sizeof(int));
-	int *h_b = (int *) malloc(numElements * sizeof(int));
-
-	// Initialize the host arrays of 'colors'
-	for (int i = 0; i < numElements; ++i) {
-		h_r[i] = rand() % 255;
-		h_g[i] = rand() % 255;
-		h_b[i] = rand() % 255;
+	if (!image.data) {
+		cout << "Could not open or find the image" << endl;
 	}
+	int width = image.cols;
+	int numElements = image.total();
+	printf("There are %i pixels in the image\n", numElements);
+	// Allocate host memory
+	vector<char> blue;
+	vector<char> green;
+	vector<char> red;
+	Vec3b pixel;
+
+	for (int i = 0; i < numElements; ++i) {
+		pixel = image(i);
+		blue.push_back(pixel.val[0]);
+		green.push_back(pixel.val[1]);
+		red.push_back(pixel.val[2]);
+	}
+	char*h_r = &red[0];
+	char*h_g = &green[0];
+	char*h_b = &blue[0];
 
 	// Allocate the device arrays of 'colors'
-	int *d_r, *d_g, *d_b;
-
-	cudaMalloc(&d_r, numElements * sizeof(int));
-	cudaMalloc(&d_g, numElements * sizeof(int));
-	cudaMalloc(&d_b, numElements * sizeof(int));
+	char *d_r, *d_g, *d_b;
+	cudaMalloc(&d_r, red.size() * sizeof(char));
+	cudaMalloc(&d_g, green.size() * sizeof(char));
+	cudaMalloc(&d_b, blue.size() * sizeof(char));
 
 	// Copy the host input vectors A and B in host memory to the device input vectors in
-	cudaMemcpy(d_r, h_r, numElements * sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_g, h_g, numElements * sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_b, h_b, numElements * sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_r, h_r, red.size() * sizeof(char), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_g, h_g, green.size() * sizeof(char), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_b, h_b, blue.size() * sizeof(char), cudaMemcpyHostToDevice);
 
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
@@ -111,9 +111,11 @@ int main(void) {
 		printMatrix(numElements, width, h_r);
 		printf("\n\n");
 	}
-	// Launch the Vector Add CUDA Kernel
+// Launch the Vector Add CUDA Kernel
 	int threadsPerBlock = 256;
+//	dim3 threadsPerBlock(width, width);
 	int blocksPerGrid = (numElements + threadsPerBlock - 1) / threadsPerBlock;
+//	dim3 blocksPerGrid(width / threadsPerBlock.x, width / threadsPerBlock.y);
 	cudaEventRecord(start);
 
 	denoise<<<blocksPerGrid, threadsPerBlock>>>(d_r, d_g, d_b, width,
@@ -125,10 +127,10 @@ int main(void) {
 
 	cudaError_t cudaError = cudaGetLastError();
 
-	// Copy the device result matrix in device memory to the host result matrix
-	cudaMemcpy(h_r, d_r, numElements * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(h_g, d_g, numElements * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(h_b, d_b, numElements * sizeof(int), cudaMemcpyDeviceToHost);
+// Copy the device result matrix in device memory to the host result matrix
+	cudaMemcpy(h_r, d_r, red.size() * sizeof(char), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_g, d_g, green.size() * sizeof(char), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_b, d_b, blue.size() * sizeof(char), cudaMemcpyDeviceToHost);
 
 	if (cudaError != cudaSuccess) {
 		fprintf(stderr, "cudaGetLastError() returned %d: %s\n", cudaError,
@@ -141,7 +143,26 @@ int main(void) {
 		printf("\n");
 	}
 	printf("GPU time to denoise the image %f ms\n", milliseconds);
+	// reassembling the image
+	Vec3b newPixel;
+	for (int i = 0; i < numElements; ++i) {
+		newPixel = image(i);
+		newPixel[0] = h_b[i];
+		newPixel[1] = h_g[i];
+		newPixel[2] = h_r[i];
+		image.at<Vec3b>(i) = newPixel;
+	}
 
+	vector<int> compression_params;
+	compression_params.push_back(CV_IMWRITE_PNG_COMPRESSION);
+	compression_params.push_back(9);
+	try {
+		imwrite("denoised.png", image, compression_params);
+	} catch (exception& ex) {
+		fprintf(stderr, "Exception converting image ot PNG format: %s\n",
+				ex.what());
+		return 1;
+	}
 	cudaFree(d_r);
 	cudaFree(d_g);
 	cudaFree(d_b);
